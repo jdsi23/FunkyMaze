@@ -1,7 +1,7 @@
 // Minimal Spotify Web Playback integration using PKCE (no client secret in browser)
 // Fill in YOUR values below before deploying.
 const SPOTIFY_CLIENT_ID = "CLIENT_ID";
-const REDIRECT_URI = "https://localhost:8080/>"; // e.g., https://game.example.com/
+const REDIRECT_URI = "https://d5t8yr615855q.cloudfront.net>"; // e.g., https://game.example.com/
 const PLAYLIST_ID = "3uuQ3HbcZagjXAlBMzpKVg"; // tracks are sampled from here
 
 async function sha256(plain) {
