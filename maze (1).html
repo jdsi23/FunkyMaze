@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tiny Pure-File FPS (Raycaster) — Endless Goals & Speed Increase</title>
+<style>
+  html, body { margin:0; height:100%; background:#111; color:#ddd; font:14px/1.4 system-ui, sans-serif; }
+  #wrap { display:flex; height:100%; align-items:center; justify-content:center; flex-direction:column; gap:8px; }
+  canvas { width: min(96vw, 960px); height: calc(min(96vw, 960px) * 9 / 16); background:#000; outline:1px solid #333; cursor: crosshair; }
+  .hud { display:flex; gap:12px; align-items:center; flex-wrap:wrap; opacity:0.9 }
+  .tag { padding:2px 6px; border:1px solid #444; border-radius:4px; }
+  .crosshair { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); pointer-events:none; color:#fff; font-size:18px; opacity:.7; }
+  .hint { opacity:.7 }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="view" width="800" height="450"></canvas>
+  <div class="hud">
+    <span class="tag">W/S: move</span>
+    <span class="tag">A/D: strafe</span>
+    <span class="tag">←/→: turn</span>
+    <span class="tag">Click: mouse-look</span>
+    <span class="tag">R: restart</span>
+    <span class="tag" id="scoreTag">Goals: 0</span>
+    <span class="hint">Endless: touch the red pillar to move it, reset the chaser to center, and speed up the game.</span>
+  </div>
+  <div class="crosshair">+</div>
+</div>
+ 
+<script>
+(() => {
+  // ====== Basic config ======
+  const canvas = document.getElementById('view');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const FOV = Math.PI / 3;       // 60 degrees
+  const MAX_DEPTH = 20;          // ray depth in tiles
+  let MOVE_SPEED = 2.8;          // tiles per second (scales up each goal)
+  let STRAFE_SPEED = 2.2;        // scales up each goal
+  let ENEMY_SPEED = MOVE_SPEED - 0.0025; // always slightly slower
+  const TURN_SPEED = 2.2;        // radians per second
+  const SPEED_MULTIPLIER = 1.15; // +15% speed each goal
+  const scoreTag = document.getElementById('scoreTag');
+ 
+  // ====== Map (1=wall, 0=empty, 2=goal) ======
+  const mapW = 16, mapH = 16;
+  const MAP = [
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,
+    1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,1,
+    1,0,0,0,1,0,0,0,1,0,0,1,0,0,0,1,
+    1,0,1,0,1,0,0,0,1,0,0,1,0,1,0,1,
+    1,0,1,0,0,0,1,0,0,0,1,0,0,1,0,1,
+    1,0,1,1,1,0,1,0,1,0,1,1,1,1,0,1,
+    1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,1,
+    1,0,1,1,1,1,1,0,0,0,1,1,1,1,0,1,
+    1,0,1,0,0,0,1,0,0,0,1,0,0,1,0,1,
+    1,0,1,0,1,0,1,0,1,0,1,0,1,1,0,1,
+    1,0,0,0,1,0,0,0,1,0,0,0,0,0,0,1,
+    1,0,1,0,1,1,1,0,1,0,1,1,1,0,1,1,
+    1,0,1,0,0,0,0,0,1,0,0,0,1,0,0,1,
+    1,0,0,0,0,0,0,0,0,0,0,0,0,0,2,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+  ];
+  const idx = (mx,my)=> my*mapW+mx;
+  const isWall = (mx,my)=> (mx<0||my<0||mx>=mapW||my>=mapH) ? true : MAP[idx(mx,my)]===1;
+ 
+  // ====== Player ======
+  const playerStart = { x: 2.5, y: 2.5, a: 0 };
+  const player = { ...playerStart };
+ 
+  // ====== Enemy (center spawn) ======
+  const enemyStart = { x: mapW / 2 + 0.5, y: mapH / 2 + 0.5 };
+  const enemy = { x: enemyStart.x, y: enemyStart.y };
+ 
+  // ====== Enemy image (static frame for now) ======
+  const enemyImg = new Image();
+  enemyImg.crossOrigin = "anonymous";
+  // Replace with your own direct image link if you want:
+  enemyImg.src = "https://media1.tenor.com/m/cb-jgcmDFFcAAAAd/ranged-pub.gif";
+  let enemyImgReady = false;
+  enemyImg.onload = ()=> enemyImgReady = true;
+
+  // === injected: dynamic enemy sprite setter ===
+  window.setEnemySprite = function(url) {
+    enemyImgReady = false;
+    enemyImg.src = url;
+  };
+ 
+  // ====== Goal helpers ======
+  function locateGoal(){
+    for (let my=0; my<mapH; my++){
+      for (let mx=0; mx<mapW; mx++){
+        if (MAP[idx(mx,my)] === 2) return { mx, my };
+      }
+    }
+    return { mx: 14, my: 14 };
+  }
+  function randomEmptyTile(minDistFrom){
+    const empties = [];
+    for (let my=0; my<mapH; my++){
+      for (let mx=0; mx<mapW; mx++){
+        if (MAP[idx(mx,my)] === 0) empties.push({mx,my});
+      }
+    }
+    // Try to pick something at least ~5 tiles away from ref point
+    for (let tries=0; tries<1000; tries++){
+      const p = empties[(Math.random()*empties.length)|0];
+      const px = (minDistFrom?.x ?? player.x), py = (minDistFrom?.y ?? player.y);
+      const d = Math.hypot(p.mx + 0.5 - px, p.my + 0.5 - py);
+      if (d > 5) return p;
+    }
+    return empties[(Math.random()*empties.length)|0];
+  }
+ 
+  function relocateGoalAndResetEnemy(){
+    // remove current goal
+    const {mx:gx, my:gy} = locateGoal();
+    MAP[idx(gx,gy)] = 0;
+ 
+    // place new goal
+    const target = randomEmptyTile({x: enemy.x, y: enemy.y});
+    MAP[idx(target.mx, target.my)] = 2;
+ 
+    // reset enemy to center
+    enemy.x = enemyStart.x;
+    enemy.y = enemyStart.y;
+ 
+    // score & speed up
+    goalsCollected++;
+    scoreTag.textContent = `Goals: ${goalsCollected}`;
+ 
+    MOVE_SPEED *= SPEED_MULTIPLIER;
+    STRAFE_SPEED *= SPEED_MULTIPLIER;
+ENEMY_SPEED = MOVE_SPEED - 0.0025; // keep enemy slightly slower
+
+    // === injected: checkpoint callback for external integrations ===
+    if (window.onCheckpointCollected) {
+      try { window.onCheckpointCollected(goalsCollected); } catch(e){ console.warn(e); }
+    }
+  }
+ 
+  let goalsCollected = 0;
+ 
+  // ====== Input ======
+  const keys = {};
+  addEventListener('keydown', e=>{ keys[e.key] = true; if (e.key==='r'||e.key==='R') reset(); });
+  addEventListener('keyup',   e=>{ keys[e.key] = false; });
+ 
+  // Pointer lock for mouse-look
+  let pointerLocked = false;
+  canvas.addEventListener('click', ()=>{ if (!pointerLocked) canvas.requestPointerLock(); });
+  document.addEventListener('pointerlockchange', ()=>{ pointerLocked = document.pointerLockElement === canvas; });
+  document.addEventListener('mousemove', (e)=>{ if (pointerLocked) player.a += e.movementX * 0.0025; });
+ 
+  // ====== Helpers ======
+  const clamp = (v,min,max)=> Math.max(min, Math.min(max,v));
+  function moveEntity(obj, dx, dy, dt) {
+    const nx = obj.x + dx * dt;
+    const ny = obj.y + dy * dt;
+    if (!isWall(nx|0, obj.y|0)) obj.x = nx;
+    if (!isWall(obj.x|0, ny|0)) obj.y = ny;
+  }
+  function angleNormalize(a){
+    while (a >  Math.PI) a -= 2*Math.PI;
+    while (a <= -Math.PI) a += 2*Math.PI;
+    return a;
+  }
+  function castRay(rayAngle){
+    const sin = Math.sin(rayAngle), cos = Math.cos(rayAngle);
+    let mapX = player.x|0, mapY = player.y|0;
+    const deltaDistX = Math.abs(1 / (cos || 1e-9));
+    const deltaDistY = Math.abs(1 / (sin || 1e-9));
+    let stepX = (cos < 0) ? -1 : 1;
+    let stepY = (sin < 0) ? -1 : 1;
+    let sideDistX = (cos < 0)
+      ? (player.x - mapX) * deltaDistX
+      : (mapX + 1.0 - player.x) * deltaDistX;
+    let sideDistY = (sin < 0)
+      ? (player.y - mapY) * deltaDistY
+      : (mapY + 1.0 - player.y) * deltaDistY;
+    let side = 0, special = 0;
+    for (let i=0;i<1024;i++){
+      if (sideDistX < sideDistY){
+        sideDistX += deltaDistX; mapX += stepX; side = 0;
+      } else {
+        sideDistY += deltaDistY; mapY += stepY; side = 1;
+      }
+      if (mapX<0||mapY<0||mapX>=mapW||mapY>=mapH) break;
+      const cell = MAP[idx(mapX,mapY)];
+      if (cell === 1) break;
+      if (cell === 2){ special = 1; break; }
+    }
+    const dist = side ? (sideDistY - deltaDistY) : (sideDistX - deltaDistX);
+    return { dist, side, special };
+  }
+ 
+  // ====== Game state ======
+  let dead = false;
+  function reset(){
+    player.x = playerStart.x; player.y = playerStart.y; player.a = playerStart.a;
+    enemy.x = enemyStart.x; enemy.y = enemyStart.y;
+    dead = false;
+    goalsCollected = 0;
+ 
+    MOVE_SPEED = 2.8;
+    STRAFE_SPEED = 2.2;
+    ENEMY_SPEED = MOVE_SPEED - 0.0025;
+ 
+    // restore goal to original, then game will move it as you play
+    for (let my=0; my<mapH; my++){
+      for (let mx=0; mx<mapW; mx++){
+        if (MAP[idx(mx,my)] === 2) MAP[idx(mx,my)] = 0;
+      }
+    }
+    MAP[idx(14,14)] = 2;
+    scoreTag.textContent = `Goals: ${goalsCollected}`;
+  }
+ 
+  // ====== Main loop ======
+  let last = performance.now();
+  function loop(t){
+    const dt = (t - last) / 1000;
+    last = t;
+ 
+    if (!dead){
+      // Input
+      if (keys['ArrowLeft'])  player.a -= TURN_SPEED * dt;
+      if (keys['ArrowRight']) player.a += TURN_SPEED * dt;
+      const forward = (keys['w']||keys['W']) ? 1 : ((keys['s']||keys['S']) ? -1 : 0);
+      const strafe  = (keys['a']||keys['A']) ? -1 : ((keys['d']||keys['D']) ? 1 : 0);
+      const cosA = Math.cos(player.a), sinA = Math.sin(player.a);
+      if (forward) moveEntity(player, cosA*MOVE_SPEED*forward, sinA*MOVE_SPEED*forward, dt);
+      if (strafe)  moveEntity(player, -sinA*STRAFE_SPEED*strafe, cosA*STRAFE_SPEED*strafe, dt);
+ 
+      // Enemy AI: chase with simple avoidance
+      const vx = player.x - enemy.x;
+      const vy = player.y - enemy.y;
+      const distPE = Math.hypot(vx, vy);
+      const ux = vx / (distPE + 1e-6);
+      const uy = vy / (distPE + 1e-6);
+      const tryMove = (dx,dy) => moveEntity(enemy, dx*ENEMY_SPEED, dy*ENEMY_SPEED, dt);
+      const ex0 = enemy.x, ey0 = enemy.y;
+      tryMove(ux, uy);
+      if (Math.hypot(enemy.x-ex0, enemy.y-ey0) < 0.001){
+        const leftx = -uy, lefty = ux;
+        const rightx = uy, righty = -ux;
+        const leftBlocked  = isWall((enemy.x + leftx*0.4)|0, (enemy.y + lefty*0.4)|0);
+        const rightBlocked = isWall((enemy.x + rightx*0.4)|0, (enemy.y + righty*0.4)|0);
+        if (!leftBlocked)  tryMove(ux + leftx*0.4,  uy + lefty*0.4);
+        else if (!rightBlocked) tryMove(ux + rightx*0.4, uy + righty*0.4);
+      }
+ 
+      // Kill check
+      if (distPE < 0.45) dead = true;
+ 
+      // Goal check (endless loop)
+      const goal = locateGoal();
+      if ((player.x|0) === goal.mx && (player.y|0) === goal.my){
+        relocateGoalAndResetEnemy();
+      }
+    }
+ 
+    // ====== DRAW ======
+    ctx.clearRect(0,0,W,H);
+ 
+    // sky & floor
+    const horizon = H/2;
+    const gradientSky = ctx.createLinearGradient(0,0,0,horizon);
+    gradientSky.addColorStop(0,'#172033'); gradientSky.addColorStop(1,'#32476b');
+    ctx.fillStyle = gradientSky; ctx.fillRect(0,0,W,horizon);
+    const gradientFloor = ctx.createLinearGradient(0,horizon,0,H);
+    gradientFloor.addColorStop(0,'#2a2a2a'); gradientFloor.addColorStop(1,'#0d0d0d');
+    ctx.fillStyle = gradientFloor; ctx.fillRect(0,horizon,W,H-horizon);
+ 
+    // walls + depth buffer
+    const zBuf = new Float32Array(W);
+    for (let x=0; x<W; x++){
+      const cameraX = (2*x / W - 1);
+      const rayAngle = player.a + Math.atan(cameraX * Math.tan(FOV/2));
+      const { dist, side, special } = castRay(rayAngle);
+ 
+      const z = Math.max(0.0001, Math.min(MAX_DEPTH, dist));
+      zBuf[x] = z;
+ 
+      const lineH = Math.min(H, (H / z) * 0.9 * (1/Math.cos(Math.atan(cameraX*Math.tan(FOV/2)))));
+      let shade = clamp(1 - (z / MAX_DEPTH), 0.1, 1);
+      if (side) shade *= 0.75;
+ 
+      ctx.fillStyle = special ? `rgba(255,120,120,${shade})` : `rgba(154,193,255,${shade})`;
+      const y0 = (H - lineH) / 2;
+      ctx.fillRect(x, y0, 1, lineH);
+    }
+ 
+    // enemy sprite (occluded by zBuf)
+    const dx = enemy.x - player.x;
+    const dy = enemy.y - player.y;
+    const spriteDist = Math.hypot(dx, dy);
+    const angleToSprite = angleNormalize(Math.atan2(dy, dx) - player.a);
+    const halfFOV = FOV / 2;
+    if (Math.abs(angleToSprite) < (halfFOV * 1.2) && enemyImgReady) {
+      const proj = Math.tan(angleToSprite);
+      const screenX = Math.floor((W/2) * (1 + (proj / Math.tan(halfFOV))));
+      const size = Math.min(H, (H / Math.max(0.0001, spriteDist)) * 0.9);
+      const y0 = (H - size) / 2;
+      const x0 = screenX - size/2;
+      const xStart = Math.max(0, Math.floor(x0));
+      const xEnd = Math.min(W-1, Math.floor(x0 + size));
+ 
+      const imgW = enemyImg.naturalWidth || enemyImg.width || 64;
+      const imgH = enemyImg.naturalHeight || enemyImg.height || 64;
+ 
+      for (let sx = xStart; sx <= xEnd; sx++){
+        if (spriteDist >= zBuf[sx]) continue; // occluded by wall
+        const u = (sx - x0) / size; // 0..1
+        const srcX = Math.floor(u * imgW);
+        ctx.drawImage(enemyImg, srcX, 0, 1, imgH, sx, y0, 1, size);
+      }
+    }
+ 
+    // mini-map
+    const scale = 6;
+    const mmW = mapW*scale, mmH = mapH*scale;
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(10,10, mmW+4, mmH+4);
+    for (let my=0; my<mapH; my++){
+      for (let mx=0; mx<mapW; mx++){
+        const c = MAP[idx(mx,my)];
+        ctx.fillStyle = c===1 ? '#666' : (c===2 ? '#c66' : '#222');
+        ctx.fillRect(12+mx*scale, 12+my*scale, scale-1, scale-1);
+      }
+    }
+    // player on minimap
+    ctx.fillStyle = '#0f0';
+    ctx.fillRect(12+player.x*scale-1, 12+player.y*scale-1, 2,2);
+    // enemy on minimap
+    ctx.fillStyle = '#f44';
+    ctx.fillRect(12+enemy.x*scale-1, 12+enemy.y*scale-1, 2,2);
+    // facing line
+    ctx.strokeStyle = '#0f0'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(12+player.x*scale, 12+player.y*scale);
+    ctx.lineTo(12+(player.x+Math.cos(player.a)*0.8)*scale, 12+(player.y+Math.sin(player.a)*0.8)*scale);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+ 
+    // death overlay
+    if (dead){
+      ctx.fillStyle = 'rgba(120,0,0,0.35)';
+      ctx.fillRect(0,0,W,H);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 36px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('YOU DIED', W/2, H/2 - 10);
+      ctx.font = '16px system-ui, sans-serif';
+      ctx.fillText('Press R to restart', W/2, H/2 + 22);
+    }
+ 
+    requestAnimationFrame(loop);
+  }
+requestAnimationFrame(loop);
+
+  // === injected: expose a start/reset entrypoint to external code ===
+  window.startMazeGame = function() {
+    try { reset(); } catch(e){ console.warn(e); }
+  };
+})();
+</script>
+
+<!-- === injected: start button + module glue for spotify + manifest bridge === -->
+<button id="startSpotify" style="position:fixed; right:12px; bottom:12px; z-index:10;">Start with Spotify</button>
+<script type="module">
+  import { gameBridge } from "./js/game.bridge.js";
+  // Hook from the game when a checkpoint is collected
+  window.onCheckpointCollected = (speed) => gameBridge.onCheckpointCollected(speed);
+  // Start with Spotify
+  document.getElementById("startSpotify").addEventListener("click", () => {
+    gameBridge.startRun();
+  });
+</script>
+
+</body>
+</html>
