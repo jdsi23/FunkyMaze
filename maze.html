@@ -134,7 +134,7 @@
  
     MOVE_SPEED *= SPEED_MULTIPLIER;
     STRAFE_SPEED *= SPEED_MULTIPLIER;
-ENEMY_SPEED = MOVE_SPEED - 0.0025; // keep enemy slightly slower
+    ENEMY_SPEED = MOVE_SPEED - 0.0025; // keep enemy slightly slower
 
     // === injected: checkpoint callback for external integrations ===
     if (window.onCheckpointCollected) {
@@ -360,7 +360,7 @@ ENEMY_SPEED = MOVE_SPEED - 0.0025; // keep enemy slightly slower
  
     requestAnimationFrame(loop);
   }
-requestAnimationFrame(loop);
+  requestAnimationFrame(loop);
 
   // === injected: expose a start/reset entrypoint to external code ===
   window.startMazeGame = function() {
@@ -369,16 +369,66 @@ requestAnimationFrame(loop);
 })();
 </script>
 
-<!-- === injected: start button + module glue for spotify + manifest bridge === -->
-<button id="startSpotify" style="position:fixed; right:12px; bottom:12px; z-index:10;">Start with Spotify</button>
+<!-- === Spotify start button (raised z-index + explicit pointer events) === -->
+<button
+  id="startSpotify"
+  style="position:fixed; right:12px; bottom:12px; z-index:99999; pointer-events:auto;"
+>
+  Start with Spotify
+</button>
+
+<!-- === Minimal non-module probe to prove clicks reach the button === -->
+<script>
+  const __btnProbe = document.getElementById('startSpotify');
+  if (!__btnProbe) { console.error('startSpotify button not found in DOM'); }
+  else {
+    __btnProbe.addEventListener('click', () => {
+      console.log('[probe] startSpotify clicked'); // should print on every click
+    }, { once:false });
+  }
+</script>
+
+<!-- === Module glue with robust error handling & logs === -->
 <script type="module">
-  import { gameBridge } from "./js/game.bridge.js";
-  // Hook from the game when a checkpoint is collected
-  window.onCheckpointCollected = (speed) => gameBridge.onCheckpointCollected(speed);
-  // Start with Spotify
-  document.getElementById("startSpotify").addEventListener("click", () => {
-    gameBridge.startRun();
-  });
+  const btn = document.getElementById("startSpotify");
+
+  async function wireSpotify() {
+    try {
+      // Try to import the bridge (path/case/MIME type must be correct)
+      const mod = await import("./js/game.bridge.js");
+      const gameBridge = mod?.gameBridge;
+
+      if (!gameBridge || typeof gameBridge.startRun !== "function") {
+        console.error("gameBridge.startRun missing or not a function. Export found:", gameBridge);
+        if (btn) btn.textContent = "Spotify (init failed)";
+        return;
+      }
+
+      // Hook called by the game when a checkpoint is collected
+      window.onCheckpointCollected = (speed) => {
+        try { gameBridge.onCheckpointCollected?.(speed); }
+        catch (e) { console.warn("onCheckpointCollected error:", e); }
+      };
+
+      // Wire the button → same-tab flow (avoids popup blocking)
+      btn?.addEventListener("click", () => {
+        console.log("[spotify] Start clicked → gameBridge.startRun()");
+        try { gameBridge.startRun(); }
+        catch (e) { console.error("startRun() threw:", e); }
+      });
+
+      console.log("[spotify] wiring complete");
+    } catch (e) {
+      // Most common: wrong path/case or S3 serves module with wrong Content-Type
+      console.error("Module import failed:", e);
+      if (btn) btn.textContent = "Spotify (module error)";
+      // If console mentions MIME type (“application/octet-stream”), re-upload JS with:
+      // aws s3 cp js/game.bridge.js s3://<bucket>/js/game.bridge.js --content-type text/javascript --cache-control no-cache
+      // then CloudFront invalidate.
+    }
+  }
+
+  wireSpotify();
 </script>
 
 </body>
