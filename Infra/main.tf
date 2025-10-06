@@ -114,13 +114,10 @@ resource "aws_cloudfront_distribution" "cdn" {
     cloudfront_default_certificate = var.acm_certificate_arn == "" ? true : false
   }
 
-dynamic "logging_config" {
-  for_each = var.enable_logging ? [1] : []
-  content {
-    include_cookies = false
-    bucket          = aws_s3_bucket.logs[0].bucket_domain_name
-    prefix          = "cloudfront/"
-  }
+logging_config {
+  include_cookies = false
+  bucket          = var.enable_logging ? aws_s3_bucket.logs[0].bucket_domain_name : null
+  prefix          = var.enable_logging ? "cloudfront/" : null
 }
 
 # Allow CloudFront (via OAI) to read from the bucket
