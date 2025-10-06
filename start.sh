@@ -15,8 +15,7 @@ terraform apply -auto-approve
 cd ..
 
 # Run grab_names.sh 
-chmod +x grab_names.sh
-./grab_names.sh
+chmod +x grab_names.sh ./grab_names.ah
 
 # Sync contents with S3 bucket
 aws s3 sync . $bucket_name \
