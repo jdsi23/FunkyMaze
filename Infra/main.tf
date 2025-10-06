@@ -113,7 +113,7 @@ resource "aws_cloudfront_distribution" "cdn" {
     minimum_protocol_version       = var.acm_certificate_arn != "" ? "TLSv1.2_2021" : null
     cloudfront_default_certificate = var.acm_certificate_arn == "" ? true : false
   }
-
+}
 logging_config {
   include_cookies = false
   bucket          = var.enable_logging ? aws_s3_bucket.logs[0].bucket_domain_name : null
