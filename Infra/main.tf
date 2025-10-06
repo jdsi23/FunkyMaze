@@ -115,7 +115,6 @@ resource "aws_cloudfront_distribution" "cdn" {
   }
 
   logging_config {
-    count          = var.enable_logging ? 1 : 0
     include_cookies = false
     bucket          = var.enable_logging ? "${aws_s3_bucket.logs[0].bucket_domain_name}" : null
     prefix          = var.enable_logging ? "cloudfront/" : null
